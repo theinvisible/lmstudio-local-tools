@@ -1,6 +1,6 @@
 {
   "name": "lms-plugin-local-tools",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "LM Studio plugin giving local models sandboxed filesystem access, git, allowlisted commands and a persistent memory",
   "private": true,
   "author": "Rene Hadler",
@@ -14,7 +14,7 @@
     "install-plugin": "lms dev --install",
     "push": "lms push",
     "typecheck": "tsc --noEmit",
-    "smoke": "tsx scripts/smoke-test.mts"
+    "test": "tsx scripts/smoke-test.mts"
   },
   "license": "MIT",
   "dependencies": {
@@ -23,6 +23,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
     "typescript": "^5.7.0"
   }
 }

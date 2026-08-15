@@ -21,6 +21,7 @@ import { createNowTool } from "../src/tools/now";
 import { createReadFileTool } from "../src/tools/readFile";
 import { createRunCommandTool, isCommandAllowed } from "../src/tools/runCommand";
 import { createSearchInFilesTool } from "../src/tools/searchInFiles";
+import { createSystemInfoTool } from "../src/tools/systemInfo";
 
 const FIXTURE = join(tmpdir(), `lms-local-tools-smoke-${process.pid}`);
 const DATA = join(FIXTURE, "data");
@@ -76,9 +77,16 @@ await writeFile(join(DATA, "binary.dat"), Buffer.from([0x00, 0x01, 0x02, 0x00, 0
 await writeFile(join(DATA, "node_modules", "pkg", "index.js"), "// UNIQUE_MARKER_42 in node_modules", "utf-8");
 await writeFile(join(SECRET_SIBLING, "leak.txt"), "this must never be readable", "utf-8");
 
+// Platform-dependent fixtures: a file that definitely exists outside the sandbox, and a link that
+// escapes it. Both are needed to prove the guard, and both look different on Windows and POSIX.
+const IS_WINDOWS = process.platform === "win32";
+const OUTSIDE_FILE = IS_WINDOWS ? "C:\\Windows\\win.ini" : "/etc/hosts";
+const LINK_TARGET = IS_WINDOWS ? "C:\\Windows" : "/etc";
+const LINK_PROBE = IS_WINDOWS ? join("link-out", "win.ini") : join("link-out", "hosts");
+
 let junctionMade = false;
 try {
-  await symlink("C:\\Windows", join(DATA, "link-out"), "junction");
+  await symlink(LINK_TARGET, join(DATA, "link-out"), IS_WINDOWS ? "junction" : "dir");
   junctionMade = true;
 } catch {
   junctionMade = false;
@@ -93,6 +101,9 @@ const deps: ToolDeps = {
   maxOutputChars: 50_000,
   memoryFile: join(FIXTURE, "memories.json"),
   maxMemories: 100,
+  // The keyword path is exercised here; semantic recall gets its own section below.
+  enableSemanticRecall: false,
+  embeddingModel: "",
   defaults: { maxLines: 500, maxMatches: 50, contextLines: 2, maxConcurrency: 8 },
 };
 
@@ -101,11 +112,11 @@ const readFileTool = createReadFileTool(deps);
 // ---------------------------------------------------------------- 1. sandbox
 
 console.log("\n=== 1. Path sandbox ===");
-await denied("absolute path outside the roots (C:\\Windows\\win.ini)", () =>
-  readFileTool.implementation({ path: "C:\\Windows\\win.ini" }, ctx),
+await denied(`absolute path outside the roots (${OUTSIDE_FILE})`, () =>
+  readFileTool.implementation({ path: OUTSIDE_FILE }, ctx),
 );
-await denied("traversal out of the root (../../Windows/win.ini)", () =>
-  readFileTool.implementation({ path: "../../Windows/win.ini" }, ctx),
+await denied("traversal out of the root (../data-secret/leak.txt)", () =>
+  readFileTool.implementation({ path: "../data-secret/leak.txt" }, ctx),
 );
 await denied("prefix trap: <fixture>/data-secret is not inside <fixture>/data", () =>
   readFileTool.implementation({ path: join(SECRET_SIBLING, "leak.txt") }, ctx),
@@ -114,11 +125,11 @@ await denied(".env inside an allowed root", () => readFileTool.implementation({ 
 await denied("id_rsa inside an allowed root", () => readFileTool.implementation({ path: "id_rsa" }, ctx));
 
 if (junctionMade) {
-  await denied("junction escaping the root (link-out -> C:\\Windows)", () =>
-    readFileTool.implementation({ path: "link-out\\win.ini" }, ctx),
+  await denied(`link escaping the root (link-out -> ${LINK_TARGET})`, () =>
+    readFileTool.implementation({ path: LINK_PROBE }, ctx),
   );
 } else {
-  skip("junction escaping the root", "could not create a junction here — realpath escape not exercised");
+  skip("link escaping the root", "could not create a directory link here — realpath escape not exercised");
 }
 
 await denied("file over the size limit", () => readFileTool.implementation({ path: "big.txt" }, ctx));
@@ -198,7 +209,10 @@ if (!gitAvailable) {
   check("git diff shows the change", String(diff.output).includes("second version"), diff);
   const show = (await gitTool.implementation({ repo: REPO, subcommand: "show" }, ctx)) as any;
   check("git show works", String(show.output).includes("first version"), show);
-  const outside = (await gitTool.implementation({ repo: "C:\\Windows", subcommand: "status" }, ctx)) as any;
+  const outside = (await gitTool.implementation(
+    { repo: IS_WINDOWS ? "C:\\Windows" : "/etc", subcommand: "status" },
+    ctx,
+  )) as any;
   check("git refuses a repo outside the sandbox", String(outside.error).includes("Denied"), outside);
 }
 
@@ -294,6 +308,90 @@ check("jwt payload decoded", (jwt.payload as any)?.name === "John Doe", jwt);
 check("jwt issued_at rendered as a date", String(jwt.issued_at).startsWith("2018-"), jwt);
 check("jwt result states the signature was not verified", String(jwt.note).includes("NOT verified"), jwt);
 
+// ---------------------------------------------------------------- 8. read_file tail
+
+console.log("\n=== 8. read_file: reading from the end ===");
+const tail = (await readFileTool.implementation({ path: "hello.txt", last_lines: 3 }, ctx)) as any;
+check(
+  "last_lines returns exactly the last lines",
+  tail.returned_lines === 3 && tail.first_line === 8 && String(tail.content).trim().endsWith("line 10"),
+  tail,
+);
+const numbered = (await readFileTool.implementation(
+  { path: "hello.txt", last_lines: 2, show_line_numbers: true },
+  ctx,
+)) as any;
+check(
+  "line numbers match the real position in the file",
+  String(numbered.content).startsWith("9\t") && String(numbered.content).includes("10\t"),
+  numbered,
+);
+const conflicting = (await readFileTool.implementation(
+  { path: "hello.txt", last_lines: 3, offset_lines: 2 },
+  ctx,
+)) as any;
+check("last_lines together with offset_lines is refused", typeof conflicting.error === "string", conflicting);
+const tailBeyond = (await readFileTool.implementation({ path: "hello.txt", last_lines: 999 }, ctx)) as any;
+check(
+  "asking for more lines than the file has returns the whole file",
+  tailBeyond.returned_lines === 10 && tailBeyond.first_line === 1,
+  tailBeyond,
+);
+
+// ---------------------------------------------------------------- 9. system_info
+
+console.log("\n=== 9. system_info ===");
+const sys = (await createSystemInfoTool(deps).implementation({}, ctx)) as any;
+check("reports platform and cores", typeof sys.os?.platform === "string" && sys.cpu?.cores > 0, {
+  platform: sys.os?.platform,
+  cores: sys.cpu?.cores,
+});
+check("reports memory with a plausible used percentage", sys.memory?.usedPercent >= 0 && sys.memory?.usedPercent <= 100, sys.memory);
+check(
+  "finds at least one disk with total > free",
+  Array.isArray(sys.disks) && sys.disks.length > 0 && sys.disks[0].totalBytes > sys.disks[0].freeBytes,
+  sys.disks?.slice(0, 2),
+);
+const sysProc = (await createSystemInfoTool(deps).implementation({ include_processes: true, max_processes: 5 }, ctx)) as any;
+check(
+  "lists processes when asked",
+  Array.isArray(sysProc.processes) && sysProc.processes.length > 0 && sysProc.processes[0].pid > 0,
+  sysProc.processes?.slice(0, 2),
+);
+
+// ---------------------------------------------------------------- 10. semantic recall
+
+console.log("\n=== 10. semantic recall ===");
+const semanticDeps: ToolDeps = {
+  ...deps,
+  enableSemanticRecall: true,
+  memoryFile: join(FIXTURE, "memories-semantic.json"),
+};
+const [semRemember, semRecall] = createMemoryTools(semanticDeps) as any[];
+await semRemember.implementation(
+  { key: "preferred-ide", content: "Uses CLion for C++ work and VS Code for TypeScript", tags: ["prefs"] },
+  ctx,
+);
+const semantic = (await semRecall.implementation({ query: "which editor does he use" }, ctx)) as any;
+
+if (semantic.search === "semantic") {
+  check("semantic search finds the note by meaning", semantic.memories?.[0]?.key === "preferred-ide", semantic);
+  console.log(`        model=${semantic.model} similarity=${semantic.memories?.[0]?.similarity}`);
+} else {
+  // This is the normal case without an embedding model loaded — and the important one: the tool
+  // must still answer, say why, and not fail.
+  check(
+    "without an embedding model recall falls back to keywords and says so",
+    semantic.search === "keyword" && typeof semantic.note === "string" && semantic.error === undefined,
+    semantic,
+  );
+  console.log(`        note: ${String(semantic.note).slice(0, 140)}`);
+  skip("semantic ranking itself", "no embedding model loaded in LM Studio — only the fallback path was exercised");
+}
+
+const semanticEmpty = (await semRecall.implementation({ query: "completely unrelated topic xyzzy" }, ctx)) as any;
+check("an unrelated query returns a result object, never an error", semanticEmpty.error === undefined, semanticEmpty);
+
 // ---------------------------------------------------------------- cleanup
 
 await rm(FIXTURE, { recursive: true, force: true });
@@ -303,4 +401,6 @@ console.log(
     (skipped > 0 ? ` (${skipped} skipped)` : "") +
     "\n",
 );
-process.exit(failures === 0 ? 0 : 1);
+// Set the code rather than calling process.exit(): tearing the loop down while child processes are
+// still closing trips a libuv assertion on Windows and turns a green run into a non-zero exit.
+process.exitCode = failures === 0 ? 0 : 1;

@@ -15,6 +15,7 @@ import { createNowTool } from "./tools/now";
 import { createReadFileTool } from "./tools/readFile";
 import { createRunCommandTool } from "./tools/runCommand";
 import { createSearchInFilesTool } from "./tools/searchInFiles";
+import { createSystemInfoTool } from "./tools/systemInfo";
 
 /** The working directory is our default sandbox root, so a broken one must not silently become "/". */
 function safeWorkingDirectory(ctl: ToolsProviderController): string {
@@ -52,6 +53,8 @@ export async function toolsProvider(ctl: ToolsProviderController): Promise<Tool[
     memoryFile:
       configuredMemoryFile !== "" ? configuredMemoryFile : join(homedir(), ".lmstudio", "local-tools-memories.json"),
     maxMemories: globalConfig.get("maxMemories"),
+    enableSemanticRecall: globalConfig.get("enableSemanticRecall"),
+    embeddingModel: globalConfig.get("embeddingModel"),
     defaults: {
       maxLines: config.get("maxLines"),
       maxMatches: config.get("maxMatches"),
@@ -71,6 +74,7 @@ export async function toolsProvider(ctl: ToolsProviderController): Promise<Tool[
     createEncodeTool(),
   ];
 
+  if (globalConfig.get("enableSystemInfo")) tools.push(createSystemInfoTool(deps));
   if (globalConfig.get("enableGit")) tools.push(createGitTool(deps));
   // No allowlist means no runnable commands, so the tool is not offered at all rather than being
   // advertised and then refusing every call.

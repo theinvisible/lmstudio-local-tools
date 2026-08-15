@@ -36,7 +36,7 @@ so `run_command` is not even offered. Add what you actually want it to reach in 
 
 | Tool | Parameters | Purpose |
 |---|---|---|
-| `read_file` | `path`, `offset_lines?`, `max_lines?`, `encoding?` | Read a text file, in pages for long ones |
+| `read_file` | `path`, `offset_lines?`, `max_lines?`, `last_lines?`, `show_line_numbers?`, `encoding?` | Read a text file — forwards in pages, or straight to the end with `last_lines` for logs |
 | `search_in_files` | `pattern`, `root?`, `glob?`, `context_lines?`, `max_matches?`, `case_sensitive?`, `regex?`, `max_files?` | grep across many files: file, line number and context |
 | `list_directory` | `path`, `recursive?`, `max_entries?`, `include_hidden?` | Names, types, sizes, modification times |
 | `find_files` | `pattern`, `root?`, `max_results?` | Locate files by glob, e.g. `**/*.log` |
@@ -48,13 +48,14 @@ so `run_command` is not even offered. Add what you actually want it to reach in 
 |---|---|---|
 | `git` | `repo`, `subcommand`, `ref?`, `file?`, `path?`, `max_count?`, `since?`, `staged?` | Read-only `status`, `log`, `diff`, `show`, `blame`, `branch`, `remote` |
 | `run_command` | `command`, `args?`, `cwd?` | Run an allowlisted executable; only offered when the allowlist is non-empty |
+| `system_info` | `include_processes?`, `max_processes?` | OS, CPU, memory, uptime and per-disk usage; optionally the biggest processes by memory |
 
 ### Memory and helpers
 
 | Tool | Parameters | Purpose |
 |---|---|---|
 | `remember` | `key`, `content`, `tags?` | Store a note that outlives the conversation |
-| `recall` | `query?`, `tags?`, `limit?` | Look up notes from any earlier chat |
+| `recall` | `query?`, `tags?`, `limit?` | Look up notes from any earlier chat, matched by meaning |
 | `forget` | `key` | Delete a note |
 | `now` | `timezone?`, `timestamp?`, `to_timezone?` | Current date/time and time-zone conversion — so the model stops guessing the date |
 | `hash` | `algorithm`, `text?` \| `file?` | md5 / sha1 / sha256 / sha512 of a string or a file |
@@ -93,7 +94,19 @@ free-form argument list, so options like `--upload-pack=` cannot be smuggled in.
 
 **Global** — what the model may touch: *Allowed directories* · *Additional blocked file names* ·
 *Max file size* · *Allowed commands for run_command* (empty = tool not offered) · *Command timeout* ·
-*Max command output* · *Memory file* · *Max stored memories* · *Enable git* · *Enable memory*.
+*Max command output* · *Memory file* · *Max stored memories* · *Semantic memory search* ·
+*Embedding model* · *Enable git* · *Enable memory* · *Enable system_info*.
+
+## Memory search
+
+`recall` ranks notes by meaning rather than by matching substrings, so *"which editor does he use"*
+finds a note that says *"Uses CLion for C++ work"*. It uses whichever embedding model is loaded in
+LM Studio (or the one named in the settings) and never loads one by itself. Notes written before a
+model was available are indexed the next time you recall, a limited number per call.
+
+**Without an embedding model loaded, recall falls back to keyword and tag matching** and says so in
+its result. That is the expected path, not an error — semantic search is an improvement on top, not
+a requirement.
 
 **Per chat** — output shaping: *Max lines per file* (800) · *Max search matches* (50) ·
 *Context lines* (2) · *Parallel file reads* (8). Model-supplied limits are clamped to these.
@@ -115,11 +128,16 @@ free-form argument list, so options like `--upload-pack=` cannot be smuggled in.
 
 ```powershell
 npm install
-npm run typecheck                    # tsc --noEmit
-npx --yes tsx scripts/smoke-test.mts # 51 checks against a throwaway fixture tree, no network
-npm run dev                          # lms dev — hot-reloading dev server, needs LM Studio running
-npm run install-plugin               # lms dev --install — install permanently
+npm run typecheck        # tsc --noEmit
+npm test                 # 61 checks against a throwaway fixture tree, fully offline
+npm run dev              # lms dev — hot-reloading dev server, needs LM Studio running
+npm run install-plugin   # lms dev --install — install permanently
 ```
+
+CI runs the suite on Linux and Windows across Node 22 and 24 — the path sandbox behaves differently
+on each (drive letters and junctions versus POSIX symlinks), so both are worth covering.
+
+See [CHANGELOG.md](CHANGELOG.md) for what changed between versions.
 
 Notes:
 

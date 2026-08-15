@@ -9,6 +9,10 @@ export interface ToolDeps {
   maxOutputChars: number;
   memoryFile: string;
   maxMemories: number;
+  /** Rank recall results by meaning using an embedding model; falls back to keywords. */
+  enableSemanticRecall: boolean;
+  /** Empty = use whichever embedding model is already loaded in LM Studio. */
+  embeddingModel: string;
   defaults: {
     maxLines: number;
     maxMatches: number;

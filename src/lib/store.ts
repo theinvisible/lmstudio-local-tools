@@ -7,6 +7,10 @@ export interface MemoryEntry {
   tags: string[];
   createdAt: string;
   updatedAt: string;
+  /** Present once an embedding model has seen this entry. Rounded to keep the file small. */
+  embedding?: number[];
+  /** Which model produced the vector — a different model invalidates it. */
+  embeddingModel?: string;
 }
 
 interface MemoryFile {
@@ -63,7 +67,38 @@ export class MemoryStore {
     await rename(temp, this.file);
   }
 
-  async remember(key: string, content: string, tags: string[]): Promise<{ entry: MemoryEntry; replaced: boolean }> {
+  /** Text an embedding model sees for one entry — key and tags carry meaning too. */
+  static embedText(entry: Pick<MemoryEntry, "key" | "content" | "tags">): string {
+    return [entry.key, entry.tags.join(" "), entry.content].filter(part => part !== "").join(" — ");
+  }
+
+  /** Writes back vectors computed lazily during recall, without disturbing concurrent writers. */
+  async attachEmbeddings(vectors: Map<string, { embedding: number[]; embeddingModel: string }>): Promise<void> {
+    if (vectors.size === 0) return;
+    return this.serialize(async () => {
+      const data = await this.load();
+      let changed = false;
+      for (const entry of data.entries) {
+        const update = vectors.get(entry.key);
+        if (update === undefined) continue;
+        entry.embedding = update.embedding;
+        entry.embeddingModel = update.embeddingModel;
+        changed = true;
+      }
+      if (changed) await this.save(data);
+    });
+  }
+
+  async all(): Promise<MemoryEntry[]> {
+    return (await this.load()).entries;
+  }
+
+  async remember(
+    key: string,
+    content: string,
+    tags: string[],
+    vector?: { embedding: number[]; embeddingModel: string },
+  ): Promise<{ entry: MemoryEntry; replaced: boolean }> {
     return this.serialize(async () => {
       const data = await this.load();
       const now = new Date().toISOString();
@@ -83,6 +118,9 @@ export class MemoryStore {
         tags,
         createdAt: existing?.createdAt ?? now,
         updatedAt: now,
+        ...(vector !== undefined
+          ? { embedding: vector.embedding, embeddingModel: vector.embeddingModel }
+          : {}),
       };
 
       if (index === -1) data.entries.push(entry);

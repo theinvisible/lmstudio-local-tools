@@ -1,7 +1,13 @@
 import { tool, type Tool } from "@lmstudio/sdk";
 import { z } from "zod";
-import { getMemoryStore } from "../lib/store";
+import { cosineSimilarity, embed, lastEmbeddingFailure } from "../lib/embeddings";
+import { getMemoryStore, MemoryStore, type MemoryEntry } from "../lib/store";
 import { describeError, type ToolDeps } from "./../lib/shared";
+
+/** How many stale/missing vectors one recall may compute before giving up and ranking with what it has. */
+const MAX_BACKFILL_PER_RECALL = 50;
+/** Below this cosine similarity an entry is noise rather than a match. */
+const MIN_SIMILARITY = 0.25;
 
 export function createMemoryTools(deps: ToolDeps): Tool[] {
   const store = getMemoryStore(deps.memoryFile, deps.maxMemories);
@@ -20,10 +26,28 @@ export function createMemoryTools(deps: ToolDeps): Tool[] {
     implementation: async ({ key, content, tags }, { status, warn }) => {
       try {
         status(`Remembering "${key}" ...`);
-        const { entry, replaced } = await store.remember(key, content, tags ?? []);
+        const tagList = tags ?? [];
+
+        // Embedding failure is not a reason to lose the note — store it either way.
+        let vector: { embedding: number[]; embeddingModel: string } | undefined;
+        if (deps.enableSemanticRecall) {
+          const embedded = await embed([MemoryStore.embedText({ key, content, tags: tagList })], deps.embeddingModel);
+          const first = embedded?.vectors[0];
+          if (embedded !== null && first !== undefined) {
+            vector = { embedding: first, embeddingModel: embedded.model };
+          }
+        }
+
+        const { entry, replaced } = await store.remember(key, content, tagList, vector);
         const total = await store.count();
         status(replaced ? `Updated "${key}"` : `Stored "${key}"`);
-        return { key: entry.key, replaced, stored_at: entry.updatedAt, total_memories: total };
+        return {
+          key: entry.key,
+          replaced,
+          stored_at: entry.updatedAt,
+          total_memories: total,
+          semantic_index: vector !== undefined,
+        };
       } catch (error) {
         const message = describeError(error);
         warn(`remember: ${message}`);
@@ -37,22 +61,103 @@ export function createMemoryTools(deps: ToolDeps): Tool[] {
     description:
       "Look up notes stored earlier with remember, from this or any previous conversation. Call it " +
       "when the user refers to something you were told before, or when you need background you do " +
-      "not have in the current conversation. Without a query it returns the most recently updated notes.",
+      "not have in the current conversation. Matches by meaning, not just by wording, so 'which " +
+      "editor does he use' finds a note about CLion. Without a query it returns the most recent notes.",
     parameters: {
-      query: z.string().optional().describe("Words to search for in the key, content and tags."),
+      query: z.string().optional().describe("What you are looking for, in plain words."),
       tags: z.array(z.string()).optional().describe("Only return notes carrying one of these tags."),
       limit: z.number().int().positive().max(50).optional().describe("Maximum notes to return (default 10)."),
     },
     implementation: async ({ query, tags, limit }, { status, warn }) => {
-      try {
-        status("Recalling ...");
-        const entries = await store.recall(query, tags ?? [], limit ?? 10);
-        status(`Found ${entries.length} memories`);
+      const wanted = limit ?? 10;
+      const tagList = tags ?? [];
+
+      const keywordFallback = async (note: string) => {
+        const entries = await store.recall(query, tagList, wanted);
         return {
           query: query ?? null,
           count: entries.length,
-          memories: entries,
-          ...(entries.length === 0 ? { note: "Nothing stored matches. Nothing was remembered about this yet." } : {}),
+          search: "keyword" as const,
+          note,
+          memories: entries.map(stripVector),
+        };
+      };
+
+      try {
+        status("Recalling ...");
+
+        if (!deps.enableSemanticRecall || query === undefined || query.trim() === "") {
+          const entries = await store.recall(query, tagList, wanted);
+          status(`Found ${entries.length} memories`);
+          return {
+            query: query ?? null,
+            count: entries.length,
+            search: "keyword" as const,
+            memories: entries.map(stripVector),
+            ...(entries.length === 0 ? { note: "Nothing stored matches." } : {}),
+          };
+        }
+
+        const queryVector = await embed([query], deps.embeddingModel);
+        const queryEmbedding = queryVector?.vectors[0];
+        if (queryVector === null || queryEmbedding === undefined) {
+          return keywordFallback(
+            `Semantic search unavailable (${lastEmbeddingFailure() ?? "no embedding model"}), used keyword matching instead. ` +
+              "Load an embedding model in LM Studio for meaning-based recall.",
+          );
+        }
+
+        const all = await store.all();
+        const candidates =
+          tagList.length === 0
+            ? all
+            : all.filter(entry => tagList.some(tag => entry.tags.some(t => t.toLowerCase() === tag.toLowerCase())));
+
+        // Notes written before semantic search existed, or indexed by a different model, get their
+        // vectors now — capped, so the first recall after switching models does not stall.
+        const stale = candidates.filter(
+          entry => entry.embedding === undefined || entry.embeddingModel !== queryVector.model,
+        );
+        if (stale.length > 0) {
+          const batch = stale.slice(0, MAX_BACKFILL_PER_RECALL);
+          status(`Indexing ${batch.length} older notes ...`);
+          const embedded = await embed(batch.map(entry => MemoryStore.embedText(entry)), deps.embeddingModel);
+          if (embedded !== null) {
+            const updates = new Map<string, { embedding: number[]; embeddingModel: string }>();
+            batch.forEach((entry, index) => {
+              const vector = embedded.vectors[index];
+              if (vector === undefined) return;
+              entry.embedding = vector;
+              entry.embeddingModel = embedded.model;
+              updates.set(entry.key, { embedding: vector, embeddingModel: embedded.model });
+            });
+            await store.attachEmbeddings(updates);
+          }
+        }
+
+        const needle = query.toLowerCase();
+        const scored = candidates
+          .filter(entry => entry.embedding !== undefined)
+          .map(entry => ({
+            entry,
+            similarity: cosineSimilarity(queryEmbedding, entry.embedding as number[]),
+            exactKey: entry.key.toLowerCase() === needle,
+          }))
+          .filter(item => item.exactKey || item.similarity >= MIN_SIMILARITY)
+          .sort((a, b) => Number(b.exactKey) - Number(a.exactKey) || b.similarity - a.similarity)
+          .slice(0, wanted);
+
+        if (scored.length === 0) {
+          return keywordFallback("Nothing was semantically close enough; fell back to keyword matching.");
+        }
+
+        status(`Found ${scored.length} memories`);
+        return {
+          query,
+          count: scored.length,
+          search: "semantic" as const,
+          model: queryVector.model,
+          memories: scored.map(item => ({ ...stripVector(item.entry), similarity: Number(item.similarity.toFixed(3)) })),
         };
       } catch (error) {
         const message = describeError(error);
@@ -88,4 +193,12 @@ export function createMemoryTools(deps: ToolDeps): Tool[] {
   });
 
   return [rememberTool, recallTool, forgetTool];
+}
+
+/** Vectors are hundreds of numbers — useful on disk, pure noise in a tool result. */
+function stripVector(entry: MemoryEntry): Omit<MemoryEntry, "embedding" | "embeddingModel"> {
+  const { embedding, embeddingModel, ...rest } = entry;
+  void embedding;
+  void embeddingModel;
+  return rest;
 }

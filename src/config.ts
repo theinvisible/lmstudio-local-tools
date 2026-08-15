@@ -102,6 +102,37 @@ export const globalConfigSchematics = createConfigSchematics()
     500,
   )
   .field(
+    "enableSemanticRecall",
+    "boolean",
+    {
+      displayName: "Semantic memory search",
+      subtitle:
+        "Rank recall results by meaning instead of matching substrings, so 'which editor' finds a note about CLion. " +
+        "Needs an embedding model loaded in LM Studio — without one, recall silently falls back to keyword matching.",
+    },
+    true,
+  )
+  .field(
+    "embeddingModel",
+    "string",
+    {
+      displayName: "Embedding model",
+      subtitle:
+        "Model key for semantic recall, e.g. text-embedding-nomic-embed-text-v1.5. " +
+        "Empty = use whichever embedding model is already loaded (never loads one by itself).",
+    },
+    "",
+  )
+  .field(
+    "enableSystemInfo",
+    "boolean",
+    {
+      displayName: "Enable system_info tool",
+      subtitle: "Reports OS, CPU, RAM, disks and optionally processes. Includes this machine's hostname.",
+    },
+    true,
+  )
+  .field(
     "enableGit",
     "boolean",
     { displayName: "Enable git tool", subtitle: "Read-only git subcommands on repositories inside the allowed directories." },
