@@ -1,0 +1,8 @@
+{
+  "type": "plugin",
+  "runner": "node",
+  "owner": "theinvisible",
+  "name": "local-tools",
+  "revision": 1,
+  "description": "Local toolbox: read and search files inside a configurable sandbox, read-only git, allowlisted commands, persistent notes, time/hash/encoding helpers."
+}
